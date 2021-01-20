@@ -6,6 +6,9 @@ import os
 import sys
 import re
 import datetime
+import socket
+import ipdb
+st = ipdb.set_trace
 
 import numpy
 
@@ -152,10 +155,22 @@ def get_network(args):
     elif args.net == 'stochasticdepth101':
         from models.stochasticdepth import stochastic_depth_resnet101
         net = stochastic_depth_resnet101()
-
+    elif args.net == 'normal_resnet':
+        from models.normal_resnet import resnet18
+        net = resnet18()
+    elif args.net == 'hyper_resnet':
+        from models.hypernet_main import Hypernet_Main
+        net = Hypernet_Main(encoder= "resnet18",hypernet_params={'vqvae_dict_size':args.dict_size})
+    elif args.net == 'normal_resnet_wo_bn':
+        from models.normal_resnet_wo_bn import resnet18
+        net = resnet18()
+    elif args.net == 'hyper_resnet_wo_bn':
+        from models.hypernet_main import Hypernet_Main
+        net = Hypernet_Main(encoder= "resnet18_wobn",hypernet_params={'vqvae_dict_size':args.dict_size})
     else:
         print('the network name you have entered is not supported yet')
         sys.exit()
+
 
     if args.gpu: #use_gpu
         net = net.cuda()
@@ -184,7 +199,12 @@ def get_training_dataloader(mean, std, batch_size=16, num_workers=2, shuffle=Tru
         transforms.Normalize(mean, std)
     ])
     #cifar100_training = CIFAR100Train(path, transform=transform_train)
-    cifar100_training = torchvision.datasets.CIFAR100(root='./data', train=True, download=True, transform=transform_train)
+
+    if "mihir" in socket.gethostname():
+        dataset_name = "/media/mihir/dataset/cifar-100"
+    else:
+        dataset_name = "./data"
+    cifar100_training = torchvision.datasets.CIFAR100(root=dataset_name, train=True, download=True, transform=transform_train)
     cifar100_training_loader = DataLoader(
         cifar100_training, shuffle=shuffle, num_workers=num_workers, batch_size=batch_size)
 
@@ -201,13 +221,16 @@ def get_test_dataloader(mean, std, batch_size=16, num_workers=2, shuffle=True):
         shuffle: whether to shuffle
     Returns: cifar100_test_loader:torch dataloader object
     """
-
+    if "mihir" in socket.gethostname():
+        dataset_name = "/media/mihir/dataset/cifar-100"
+    else:
+        dataset_name = "./data"
     transform_test = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean, std)
     ])
     #cifar100_test = CIFAR100Test(path, transform=transform_test)
-    cifar100_test = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform_test)
+    cifar100_test = torchvision.datasets.CIFAR100(root=dataset_name, train=False, download=True, transform=transform_test)
     cifar100_test_loader = DataLoader(
         cifar100_test, shuffle=shuffle, num_workers=num_workers, batch_size=batch_size)
 

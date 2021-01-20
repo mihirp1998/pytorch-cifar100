@@ -10,7 +10,10 @@ import os
 import sys
 import argparse
 import time
+import pickle
 from datetime import datetime
+import ipdb
+st = ipdb.set_trace
 
 import numpy as np
 import torch
@@ -20,14 +23,13 @@ import torchvision
 import torchvision.transforms as transforms
 
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+from tensorboardX  import SummaryWriter
 
 from conf import settings
 from utils import get_network, get_training_dataloader, get_test_dataloader, WarmUpLR, \
     most_recent_folder, most_recent_weights, last_epoch, best_acc_weights
 
 def train(epoch):
-
     start = time.time()
     net.train()
     for batch_index, (images, labels) in enumerate(cifar100_training_loader):
@@ -36,15 +38,32 @@ def train(epoch):
             labels = labels.cuda()
             images = images.cuda()
 
+        n_iter = (epoch - 1) * len(cifar100_training_loader) + batch_index + 1
+        # st()
+        args_dict = {'logger':writer,'iteration':n_iter,'dynamic_dict':args.dynamic_dict}
+
         optimizer.zero_grad()
-        outputs = net(images)
+        if "hyper" in args.net:
+            outputs = net(images, args_dict)        
+            hypernet_loss =outputs[1]
+            outputs =outputs[0]
+        else:
+            outputs = net(images)
+
         loss = loss_function(outputs, labels)
+        # st()
+        if "hyper" in args.net:
+            classification_loss = loss
+            loss = loss + hypernet_loss * args.vq_loss_coeff
+            # st()
+            writer.add_scalar('Train/class_loss', classification_loss.item(), n_iter)
+            writer.add_scalar('Train/hyper_loss', hypernet_loss.item(), n_iter)
+
         loss.backward()
         optimizer.step()
 
-        n_iter = (epoch - 1) * len(cifar100_training_loader) + batch_index + 1
-
         last_layer = list(net.children())[-1]
+        # st()
         for name, para in last_layer.named_parameters():
             if 'weight' in name:
                 writer.add_scalar('LastLayerGradients/grad_norm2_weights', para.grad.norm(), n_iter)
@@ -61,9 +80,9 @@ def train(epoch):
 
         #update training loss for each iteration
         writer.add_scalar('Train/loss', loss.item(), n_iter)
-
-        if epoch <= args.warm:
-            warmup_scheduler.step()
+        if not args.fix_lr:
+            if epoch <= args.warm:
+                warmup_scheduler.step()
 
     for name, param in net.named_parameters():
         layer, attr = os.path.splitext(name)
@@ -88,8 +107,13 @@ def eval_training(epoch=0, tb=True):
         if args.gpu:
             images = images.cuda()
             labels = labels.cuda()
-
+        # st()
         outputs = net(images)
+
+        if isinstance(outputs,type([])):
+            hypernet_loss =outputs[1]
+            outputs =outputs[0]
+
         loss = loss_function(outputs, labels)
 
         test_loss += loss.item()
@@ -117,18 +141,44 @@ def eval_training(epoch=0, tb=True):
     return correct.float() / len(cifar100_test_loader.dataset)
 
 if __name__ == '__main__':
-
     parser = argparse.ArgumentParser()
     parser.add_argument('-net', type=str, required=True, help='net type')
-    parser.add_argument('-gpu', action='store_true', default=False, help='use gpu or not')
+    parser.add_argument('-gpu', action='store_true', default=True, help='use gpu or not')
     parser.add_argument('-b', type=int, default=128, help='batch size for dataloader')
     parser.add_argument('-warm', type=int, default=1, help='warm up training phase')
-    parser.add_argument('-lr', type=float, default=0.1, help='initial learning rate')
+    parser.add_argument('-lr', type=float, default=1e-4, help='initial learning rate')
+    parser.add_argument('-fix_lr', type=bool, default=True, help='initial learning rate')
+    parser.add_argument('-dict_size', type=int, default=100, help='initial learning rate')
+    parser.add_argument('-vq_loss_coeff', type=int, default=1.0, help='initial learning rate')
     parser.add_argument('-resume', action='store_true', default=False, help='resume training')
+    parser.add_argument('-dynamic_dict', action='store_true', default=False, help='resume training')
+
     args = parser.parse_args()
-
     net = get_network(args)
+    # st()
+    # st()
+    name =  f"batchsize-{args.b}__lr-{args.lr}__dictSize-{args.dict_size}__vqCoeff-{args.vq_loss_coeff}__dynamicdict-{args.dynamic_dict}__fixlr-{args.fix_lr}"
+    # st()
+    writer = SummaryWriter(log_dir=os.path.join(
+            settings.LOG_DIR, args.net, name, settings.TIME_NOW))
 
+    if False:
+        if "hyper" not in args.net: 
+            weight_names = []
+            bias_names = []
+            for name, param in net.named_parameters():
+                if "weight" in name:
+                    writer.add_histogram("encoder_weight_"+name, param.clone().cpu().data.numpy(),0)
+                    weight_names.append("encoder_weight_"+name)
+
+                if "bias" in name:
+                    writer.add_histogram("encoder_bias_"+name, param.clone().cpu().data.numpy(),0)
+                    bias_names.append("encoder_bias_"+name)
+            # val = pickle.load(open("hypernet.p","rb"))
+            # val['encoder_kernel'][0] = weight_names
+            # val['encoder_bias'][0] = bias_names
+            # pickle.dump(val,open("hypernet.p","wb"))
+            # st()
     #data preprocessing:
     cifar100_training_loader = get_training_dataloader(
         settings.CIFAR100_TRAIN_MEAN,
@@ -148,9 +198,10 @@ if __name__ == '__main__':
 
     loss_function = nn.CrossEntropyLoss()
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-    train_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=settings.MILESTONES, gamma=0.2) #learning rate decay
+    if not args.fix_lr:
+        train_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=settings.MILESTONES, gamma=0.2) #learning rate decay
+        warmup_scheduler = WarmUpLR(optimizer, iter_per_epoch * args.warm)
     iter_per_epoch = len(cifar100_training_loader)
-    warmup_scheduler = WarmUpLR(optimizer, iter_per_epoch * args.warm)
 
     if args.resume:
         recent_folder = most_recent_folder(os.path.join(settings.CHECKPOINT_PATH, args.net), fmt=settings.DATE_FORMAT)
@@ -166,14 +217,17 @@ if __name__ == '__main__':
     if not os.path.exists(settings.LOG_DIR):
         os.mkdir(settings.LOG_DIR)
 
+    # st()
     #since tensorboard can't overwrite old values
     #so the only way is to create a new tensorboard log
-    writer = SummaryWriter(log_dir=os.path.join(
-            settings.LOG_DIR, args.net, settings.TIME_NOW))
+
+    
+    
+
     input_tensor = torch.Tensor(1, 3, 32, 32)
     if args.gpu:
         input_tensor = input_tensor.cuda()
-    writer.add_graph(net, input_tensor)
+    # writer.add_graph(net, input_tensor)
 
     #create checkpoint folder to save model
     if not os.path.exists(checkpoint_path):
@@ -202,8 +256,9 @@ if __name__ == '__main__':
 
 
     for epoch in range(1, settings.EPOCH + 1):
-        if epoch > args.warm:
-            train_scheduler.step(epoch)
+        if not args.fix_lr:
+            if epoch > args.warm:
+                train_scheduler.step(epoch)
 
         if args.resume:
             if epoch <= resume_epoch:
@@ -211,7 +266,6 @@ if __name__ == '__main__':
 
         train(epoch)
         acc = eval_training(epoch)
-
         #start to save best performance model after learning rate decay to 0.01
         if epoch > settings.MILESTONES[1] and best_acc < acc:
             weights_path = checkpoint_path.format(net=args.net, epoch=epoch, type='best')
@@ -224,5 +278,4 @@ if __name__ == '__main__':
             weights_path = checkpoint_path.format(net=args.net, epoch=epoch, type='regular')
             print('saving weights file to {}'.format(weights_path))
             torch.save(net.state_dict(), weights_path)
-
     writer.close()
